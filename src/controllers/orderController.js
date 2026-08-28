@@ -17,6 +17,19 @@ const prisma = new PrismaClient();
 // Fishbowl Service
 const fishbowl = require('../services/fishbowlService');
 
+// ClubPro (Larimar Logistics WMS) order webhook
+const { sendClubProOrderWebhook } = require('../utils/clubProWebhook');
+
+// Splits a Stripe "name" field ("Jon Doe") into { firstName, lastName }
+function splitName(fullName) {
+  if (!fullName) return { firstName: null, lastName: null };
+  const parts = fullName.trim().split(/\s+/);
+  return {
+    firstName: parts[0],
+    lastName: parts.length > 1 ? parts.slice(1).join(" ") : null,
+  };
+}
+
 // Email transporter
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -49,12 +62,26 @@ exports.stripeWebhook = async (req, res) => {
     return res.status(400).send("Webhook Error");
   }
 
+  console.log("\n========== [WEBHOOK] Stripe event received ==========");
+  console.log("Event type:", event.type);
+
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
     const items = JSON.parse(session.metadata.items || "[]");
     const shippingCost = parseFloat(session.metadata.shippingCost || "0");
     const serviceLevel = session.metadata.serviceLevel || "";
     const serviceName = session.metadata.serviceName || "";
+
+    console.log("Session amount_total:", session.amount_total, "| currency:", session.currency);
+    console.log("Session customer_details (name/email/address entered on Stripe hosted page):", JSON.stringify(session.customer_details, null, 2));
+    console.log("Session shipping_details:", JSON.stringify(session.shipping_details, null, 2));
+    console.log("Parsed items from metadata:", JSON.stringify(items, null, 2));
+    console.log("Shipping cost:", shippingCost, "| serviceLevel:", serviceLevel, "| serviceName:", serviceName);
+
+    // Prefer the shipping address entered on Stripe's hosted page; fall back to the billing/customer address
+    const shipSource = session.shipping_details || session.customer_details || {};
+    const shipAddr = shipSource.address || {};
+    const { firstName: shipFirstName, lastName: shipLastName } = splitName(shipSource.name);
 
     try {
       await prisma.$transaction(async (tx) => {
@@ -74,6 +101,16 @@ exports.stripeWebhook = async (req, res) => {
             totalAmount: session.amount_total / 100,
             shipmentCost: shippingCost,
             shipmentStatus: "UNKNOWN",
+            shipFirstName,
+            shipLastName,
+            shipAddress1: shipAddr.line1 || null,
+            shipAddress2: shipAddr.line2 || null,
+            shipCity: shipAddr.city || null,
+            shipState: shipAddr.state || null,
+            shipZip: shipAddr.postal_code || null,
+            shipCountry: shipAddr.country || null,
+            shipEmail: session.customer_details?.email || null,
+            shipPhone: session.customer_details?.phone || null,
             items: {
               create: items.map((item) => ({
                 productId: item.id,
@@ -85,7 +122,46 @@ exports.stripeWebhook = async (req, res) => {
           include: { items: true },
         });
 
-        // 2. Decrease stock in Prisma
+        console.log("Order created in DB:", JSON.stringify(order, null, 2));
+
+        // 2. ClubPro (WMS) Webhook — sent right after order creation so it
+        // never gets blocked/rolled back by Fishbowl or Shippo failures below.
+        try {
+          const orderProducts = await tx.product.findMany({
+            where: { id: { in: items.map((i) => i.id) } },
+          });
+
+          await sendClubProOrderWebhook({
+            order: {
+              order_number: String(order.id),
+              order_date: order.createdAt.toISOString(),
+            },
+            customer: {
+              first_name: shipFirstName || null,
+              last_name: shipLastName || null,
+              address1: shipAddr.line1 || null,
+              address2: shipAddr.line2 || null,
+              city: shipAddr.city || null,
+              state: shipAddr.state || null,
+              zip: shipAddr.postal_code || null,
+              country: shipAddr.country || null,
+              email: session.customer_details?.email || null,
+              phone: session.customer_details?.phone || null,
+            },
+            line_items: items.map((item) => {
+              const product = orderProducts.find((p) => p.id === item.id);
+              return {
+                sku: product?.sku || "",
+                quantity: item.qty,
+                price: Number(item.price).toFixed(2),
+              };
+            }),
+          });
+        } catch (clubProErr) {
+          console.error("ClubPro webhook failed:", clubProErr);
+        }
+
+        // 3. Decrease stock in Prisma
         for (const item of items) {
           const product = await tx.product.findUnique({
             where: { id: item.id },
@@ -149,7 +225,9 @@ exports.stripeWebhook = async (req, res) => {
           // Optional: notify admin or rollback
         }
 
-        // 4. Shippo Order (existing code)
+        // 4. Shippo Order (wrapped so a bad/test shipping address doesn't
+        // roll back the order + Fishbowl sync + ClubPro webhook above)
+        try {
         const products = await tx.product.findMany({
           where: { id: { in: items.map((i) => i.id) } },
         });
@@ -192,7 +270,7 @@ exports.stripeWebhook = async (req, res) => {
           return {
             title: product.name,
             variantTitle: product.color || "",
-            sku: "",
+            sku: product.sku || "",
             quantity: item.qty,
             totalPrice: (item.price * item.qty).toFixed(2),
             currency: "USD",
@@ -228,12 +306,16 @@ exports.stripeWebhook = async (req, res) => {
         });
 
         console.log('Shippo Order created:', shippoOrder.objectId);
+        } catch (shippoErr) {
+          console.error("Shippo order creation failed:", shippoErr);
+        }
       }, { timeout: 30000 }); // Increased timeout for Fishbowl API calls
     } catch (err) {
       console.error("Critical error in webhook processing:", err);
     }
   }
 
+  console.log("========== [WEBHOOK] End ==========\n");
   res.json({ received: true });
 };
 
@@ -242,6 +324,13 @@ exports.stripeWebhook = async (req, res) => {
 // ────────────────────────────────────────────────
 exports.stripeSession = async (req, res) => {
   try {
+    console.log("\n========== [CHECKOUT] Incoming request ==========");
+    console.log("Headers:", {
+      "content-type": req.headers["content-type"],
+      authorization: req.headers.authorization ? "Bearer ***" : undefined,
+    });
+    console.log("Raw body (req.body):", JSON.stringify(req.body, null, 2));
+
     if (!req.body || !req.body.items) {
       return res.status(400).json({ message: "Missing or invalid items" });
     }
@@ -256,6 +345,8 @@ exports.stripeSession = async (req, res) => {
     if (!customer) {
       return res.status(404).json({ message: "Customer not found" });
     }
+
+    console.log("Customer record (from DB, used for billing/shipping):", JSON.stringify(customer, null, 2));
 
     const itemIds = items.map((i) => Number(i.id));
 
@@ -414,6 +505,7 @@ exports.stripeSession = async (req, res) => {
       customer_update: { name: "auto", address: "auto", shipping: "auto" },
       billing_address_collection: "required",
       shipping_address_collection: { allowed_countries: ["US", "CA"] },
+      phone_number_collection: { enabled: true },
       line_items,
       metadata: {
         customerId: String(customerId),
@@ -425,6 +517,12 @@ exports.stripeSession = async (req, res) => {
       success_url: `https://clubpromfg.com/greengrass/`,
       cancel_url: `https://clubpromfg.com/greengrass/`,
     });
+
+    console.log("Computed shipping cost:", shippingCost, "| selected rate:", selectedRate?.servicelevel?.name || "none");
+    console.log("Stripe line_items sent:", JSON.stringify(line_items, null, 2));
+    console.log("Stripe session metadata:", JSON.stringify(session.metadata, null, 2));
+    console.log("Stripe checkout session URL:", session.url);
+    console.log("========== [CHECKOUT] End ==========\n");
 
     res.json({ url: session.url });
   } catch (err) {

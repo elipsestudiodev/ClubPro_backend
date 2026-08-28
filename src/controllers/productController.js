@@ -9,6 +9,7 @@ const createProduct = async (req, res) => {
   try {
     const {
       name,
+      sku,
       regularPrice,
       salePrice,
       stock = 0,
@@ -67,6 +68,7 @@ const createProduct = async (req, res) => {
     const product = await prisma.product.create({
       data: {
         name: name.trim(),
+        sku: sku?.trim() || null,
         regularPrice: parsedRegularPrice,
         salePrice: parsedSalePrice,
         stock: parsedStock,
@@ -173,7 +175,7 @@ try {
 const updateProduct = async (req, res) => {
   const { id } = req.params;
   const {
-    name, regularPrice, salePrice, stock, color, brandId, modelId, typeId,
+    name, sku, regularPrice, salePrice, stock, color, brandId, modelId, typeId,
     weightLb, lengthIn, widthIn, heightIn, description, seoTitle,
     seoDescription, seoKeywords, slug, imgAltOne, imgAltTwo, imgAltThree, imgAltFour,
   } = req.body;
@@ -210,6 +212,7 @@ const updateProduct = async (req, res) => {
 
     const updateData = {};
     if (name !== undefined) updateData.name = name.trim();
+    if (sku !== undefined) updateData.sku = sku?.trim() || null;
     if (regularPrice !== undefined) updateData.regularPrice = parseFloat(regularPrice);
     if (salePrice !== undefined) updateData.salePrice = salePrice ? parseFloat(salePrice) : null;
     if (stock !== undefined) updateData.stock = parseInt(stock, 10);
@@ -478,6 +481,7 @@ const importProductsFromCSV = async (req, res) => {
     for (const row of products) {
       const {
         name,
+        sku,
         brand,
         model,
         type,
@@ -576,6 +580,7 @@ const importProductsFromCSV = async (req, res) => {
         await prisma.product.update({
           where: { id: existingProduct.id },
           data: {
+            sku: sku?.trim() || existingProduct.sku,
             stock: parseInt(stock || 0, 10),
             salePrice: salePrice ? parseFloat(salePrice) : 0,
             regularPrice: regularPrice ? parseFloat(regularPrice) : 0,
@@ -601,6 +606,7 @@ const importProductsFromCSV = async (req, res) => {
         await prisma.product.create({
           data: {
             name: name.trim(),
+            sku: sku?.trim() || null,
             stock: parseInt(stock || 0, 10),
             salePrice: salePrice ? parseFloat(salePrice) : 0,
             regularPrice: regularPrice ? parseFloat(regularPrice) : 0,
