@@ -20,7 +20,7 @@ async function sendClubProOrderWebhook(payload) {
   const signature = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
 
   console.log("URL:", url);
-  console.log("Payload:", rawBody);
+  console.log("Payload:\n", JSON.stringify(payload, null, 2));
   console.log("x-clubpro-timestamp:", timestamp);
   console.log("x-clubpro-signature:", signature);
 

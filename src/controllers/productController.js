@@ -259,6 +259,9 @@ const updateProduct = async (req, res) => {
     res.status(200).json({ message: "Product updated", product: updatedProduct });
   } catch (error) {
     console.error("Update product error:", error);
+    if (error.code === 'P2002' && (error.meta?.target?.includes('sku') || String(error.message).includes('sku'))) {
+      return res.status(400).json({ message: `SKU "${sku}" is already assigned to another product.` });
+    }
     res.status(500).json({ message: "Failed to update product", error: error.message });
   }
 };
