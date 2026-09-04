@@ -227,7 +227,9 @@ exports.stripeWebhook = async (req, res) => {
         }
         */
 
-        // B. Create Sales Order in Fishbowl
+        // B. Create Sales Order in Fishbowl — disabled along with the rest
+        // of the Fishbowl sync above (see comment at the top of this file).
+        /*
         try {
           let soCSV = `SONum,CustomerName,ItemNumber,Quantity,Price,UOM,LocationGroup,SOType,Date\n"#${order.id}","${fbCustomerNum}"`;
 
@@ -253,11 +255,13 @@ exports.stripeWebhook = async (req, res) => {
           console.log(`Fishbowl Sales Order created: #${order.id}`);
         } catch (fbErr) {
           console.error("Fishbowl Sales Order creation failed:", fbErr);
-          // Optional: notify admin or rollback
         }
+        */
 
-        // 4. Shippo Order (wrapped so a bad/test shipping address doesn't
-        // roll back the order + Fishbowl sync + ClubPro webhook above)
+        // 4. Shippo Order (label/tracking creation) — disabled per user
+        // request. Shipping-cost calculation at checkout (stripeSession)
+        // stays active; this was only the post-payment label/order sync.
+        /*
         try {
         const products = await tx.product.findMany({
           where: { id: { in: items.map((i) => i.id) } },
@@ -340,6 +344,7 @@ exports.stripeWebhook = async (req, res) => {
         } catch (shippoErr) {
           console.error("Shippo order creation failed:", shippoErr);
         }
+        */
       }, { timeout: 30000 }); // Increased timeout for Fishbowl API calls
     } catch (err) {
       console.error("Critical error in webhook processing:", err);
