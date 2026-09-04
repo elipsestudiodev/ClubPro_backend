@@ -8,13 +8,17 @@ class FishbowlService {
 
   async login() {
     try {
-      const response = await axios.post(`${this.baseURL}/api/login`, {
-        appName: 'ClubProEcom',
-        appDescription: 'E-commerce Integration with Prisma',
-        appId: 987654321,
-        username: process.env.FISHBOWL_USERNAME,
-        password: process.env.FISHBOWL_PASSWORD,
-      });
+      const response = await axios.post(
+        `${this.baseURL}/api/login`,
+        {
+          appName: 'ClubProEcom',
+          appDescription: 'E-commerce Integration with Prisma',
+          appId: 987654321,
+          username: process.env.FISHBOWL_USERNAME,
+          password: process.env.FISHBOWL_PASSWORD,
+        },
+        { timeout: 5000 }
+      );
 
       if (!response.data?.token) {
         throw new Error('No token received from Fishbowl');
@@ -43,6 +47,7 @@ class FishbowlService {
         ...customHeaders,
       },
       data,
+      timeout: 5000,
     };
 
     try {

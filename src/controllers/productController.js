@@ -88,81 +88,69 @@ const createProduct = async (req, res) => {
       include: { brand: { select: { name: true } }, model: { select: { name: true } }, productType: { select: { name: true } } },
     });
 
-   // ─────────────────────────────────────────────
-// Fishbowl Sync - Start
-let csvData = ''; // declare outside try for catch access
-
-try {
-  const partNumber = `PROD-${product.id}`;
-
-  // Description ko 100% safe banao (blank nahi jaayega)
-  let descriptionValue = product.description?.trim();
-  if (!descriptionValue || descriptionValue.length < 1) {
-    descriptionValue = `Product: ${product.name.trim()} - Imported from e-commerce`;
-  }
-  console.log('[Fishbowl Debug] Final description:', descriptionValue);
-
-  // Special characters clean (Fishbowl strict parser ke liye)
-  descriptionValue = descriptionValue
-    .replace(/"/g, '""')           // escape double quotes
-    .replace(/\r?\n|\r/g, ' ')     // line breaks ko space mein
-    .replace(/,/g, ' ')            // comma ko space mein (CSV break na ho)
-    .trim();
-
-  // Exact Fishbowl import format (tumhare documents se verified)
-  const csvHeader = "PartNumber,PartDescription,PartType,UOM,Price,Weight,Active,ManagePart,POItemType";
-
-  // Row values (sab string mein aur quote wrapped)
-  const rowValues = [
-    partNumber,
-    descriptionValue,
-    "Inventory",                  // Required: Inventory, Non-Inventory, Service, etc.
-    "ea",                       // Required UOM
-    Number(product.salePrice || product.regularPrice || 0).toFixed(2),
-    Number(product.weightLb || 1).toFixed(2),
-    "Y",                         
-    "Y",
-    "Purchase"                      
-  ];
-
-  // CSV row banao with proper quoting
-  const csvRow = rowValues.map(value => {
-    const str = String(value);
-    return `"${str.replace(/"/g, '""')}"`;
-  }).join(',');
-
-  csvData = csvHeader + "\r\n" + csvRow;
-
-  // Debug print (exact CSV jo ja raha hai)
-  console.log('[Fishbowl Debug] Final CSV (line by line):');
-  console.log(csvHeader);
-  console.log(csvRow);
-  console.log('[Fishbowl Debug] Full CSV length:', csvData.length);
-  console.log('[Fishbowl Debug] Full CSV content:');
-  console.log(csvData);
-
-  // Import call
-  const fbResponse = await fishbowl.importPart(csvData);
-
-  console.log('Fishbowl import response:', JSON.stringify(fbResponse, null, 2));
-
-  // Save to Prisma
-  await prisma.product.update({
-    where: { id: product.id },
-    data: { fishbowlPartNumber: partNumber },
-  });
-
-  console.log(`Fishbowl Part synced successfully: ${partNumber}`);
-} catch (fbErr) {
-  console.error('Fishbowl product sync failed details:', {
-    message: fbErr.message,
-    status: fbErr.response?.status,
-    fullError: fbErr.response?.data,
-    csvSent: csvData || 'CSV not defined'
-  });
-}
-
+    // Return response immediately so UI doesn't hang on Fishbowl API call
     res.status(201).json({ message: "Product created", product });
+
+    // ─────────────────────────────────────────────
+    // Fishbowl Sync - Background Execution (Non-Blocking)
+    (async () => {
+      let csvData = '';
+      try {
+        const partNumber = `PROD-${product.id}`;
+
+        // Description safe format
+        let descriptionValue = product.description?.trim();
+        if (!descriptionValue || descriptionValue.length < 1) {
+          descriptionValue = `Product: ${product.name.trim()} - Imported from e-commerce`;
+        }
+
+        // Clean special characters
+        descriptionValue = descriptionValue
+          .replace(/"/g, '""')           // escape double quotes
+          .replace(/\r?\n|\r/g, ' ')     // line breaks to space
+          .replace(/,/g, ' ')            // comma to space
+          .trim();
+
+        const csvHeader = "PartNumber,PartDescription,PartType,UOM,Price,Weight,Active,ManagePart,POItemType";
+
+        const rowValues = [
+          partNumber,
+          descriptionValue,
+          "Inventory",
+          "ea",
+          Number(product.salePrice || product.regularPrice || 0).toFixed(2),
+          Number(product.weightLb || 1).toFixed(2),
+          "Y",
+          "Y",
+          "Purchase"
+        ];
+
+        const csvRow = rowValues.map(value => {
+          const str = String(value);
+          return `"${str.replace(/"/g, '""')}"`;
+        }).join(',');
+
+        csvData = csvHeader + "\r\n" + csvRow;
+
+        const fbResponse = await fishbowl.importPart(csvData);
+        console.log('[Background] Fishbowl import response:', JSON.stringify(fbResponse, null, 2));
+
+        // Save to Prisma
+        await prisma.product.update({
+          where: { id: product.id },
+          data: { fishbowlPartNumber: partNumber },
+        });
+
+        console.log(`[Background] Fishbowl Part synced successfully: ${partNumber}`);
+      } catch (fbErr) {
+        console.error('[Background] Fishbowl product sync failed details:', {
+          message: fbErr.message,
+          status: fbErr.response?.status,
+          fullError: fbErr.response?.data,
+          csvSent: csvData || 'CSV not defined'
+        });
+      }
+    })();
   } catch (error) {
     console.error("Create product error:", error);
     res.status(500).json({ message: "Failed to create product", error: error.message });
@@ -242,21 +230,24 @@ const updateProduct = async (req, res) => {
       include: { brand: { select: { name: true } }, model: { select: { name: true } }, productType: { select: { name: true } } },
     });
 
-    // ─── Fishbowl Sync on Update ───
-    if (updatedProduct.fishbowlPartNumber) {
-      try {
-        const csvHeader = "PartNumber,Description,UOM,Price,WeightLb,Type,Active,ManagePart";
-        const csvRow = `"${updatedProduct.fishbowlPartNumber}","${updatedProduct.name} - ${updatedProduct.description || ''}","Each",${updatedProduct.salePrice || updatedProduct.regularPrice},${updatedProduct.weightLb || 1},"Inventory","Y","Y"`;
-        const csvData = `${csvHeader}\n${csvRow}`;
-
-        await fishbowl.importPart(csvData);
-        console.log(`Fishbowl Part updated: ${updatedProduct.fishbowlPartNumber}`);
-      } catch (fbErr) {
-        console.error('Fishbowl update sync failed:', fbErr);
-      }
-    }
-
+    // Return response immediately
     res.status(200).json({ message: "Product updated", product: updatedProduct });
+
+    // ─── Fishbowl Sync on Update (Background Execution) ───
+    if (updatedProduct.fishbowlPartNumber) {
+      (async () => {
+        try {
+          const csvHeader = "PartNumber,Description,UOM,Price,WeightLb,Type,Active,ManagePart";
+          const csvRow = `"${updatedProduct.fishbowlPartNumber}","${updatedProduct.name} - ${updatedProduct.description || ''}","Each",${updatedProduct.salePrice || updatedProduct.regularPrice},${updatedProduct.weightLb || 1},"Inventory","Y","Y"`;
+          const csvData = `${csvHeader}\n${csvRow}`;
+
+          await fishbowl.importPart(csvData);
+          console.log(`[Background] Fishbowl Part updated: ${updatedProduct.fishbowlPartNumber}`);
+        } catch (fbErr) {
+          console.error('[Background] Fishbowl update sync failed:', fbErr.message || fbErr);
+        }
+      })();
+    }
   } catch (error) {
     console.error("Update product error:", error);
     if (error.code === 'P2002' && (error.meta?.target?.includes('sku') || String(error.message).includes('sku'))) {
