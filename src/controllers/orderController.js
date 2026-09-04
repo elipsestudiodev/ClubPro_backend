@@ -14,8 +14,8 @@ const shippo = new Shippo({
 
 const prisma = new PrismaClient();
 
-// Fishbowl Service
-const fishbowl = require('../services/fishbowlService');
+// Fishbowl Service disabled per user request
+// const fishbowl = require('../services/fishbowlService');
 
 // ClubPro (Larimar Logistics WMS) order webhook
 const { sendClubProOrderWebhook } = require('../utils/clubProWebhook');
@@ -45,7 +45,7 @@ const transporter = nodemailer.createTransport({
 });
 
 // ────────────────────────────────────────────────
-// Stripe Webhook - Payment Complete → Order + Fishbowl Sync
+// Stripe Webhook - Payment Complete → Order + Middleware Webhook Sync
 // ────────────────────────────────────────────────
 exports.stripeWebhook = async (req, res) => {
   const sig = req.headers["stripe-signature"];
@@ -67,7 +67,11 @@ exports.stripeWebhook = async (req, res) => {
 
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
-    const items = JSON.parse(session.metadata.items || "[]");
+    const rawItems = JSON.parse(session.metadata.items || "[]");
+    const items = rawItems.map((item) => ({
+      ...item,
+      qty: Math.max(1, Number(item.qty || item.quantity || item.count || 1)),
+    }));
     const shippingCost = parseFloat(session.metadata.shippingCost || "0");
     const serviceLevel = session.metadata.serviceLevel || "";
     const serviceName = session.metadata.serviceName || "";
@@ -98,7 +102,7 @@ exports.stripeWebhook = async (req, res) => {
           throw new Error("Customer not found");
         }
 
-        // 1. Create order in Prisma
+        // 1. Create order in Prisma (so it immediately displays in Admin Dashboard)
         const order = await tx.order.create({
           data: {
             customerId: Number(session.metadata.customerId),
@@ -120,17 +124,16 @@ exports.stripeWebhook = async (req, res) => {
               create: items.map((item) => ({
                 productId: item.id,
                 quantity: item.qty,
-                priceAtOrder: item.price,
+                priceAtOrder: Number(item.price),
               })),
             },
           },
           include: { items: true },
         });
 
-        console.log("Order created in DB:", JSON.stringify(order, null, 2));
+        console.log("Order created in DB (Visible in Admin Dashboard):", JSON.stringify(order, null, 2));
 
-        // 2. ClubPro (WMS) Webhook — sent right after order creation so it
-        // never gets blocked/rolled back by Fishbowl or Shippo failures below.
+        // 2. Send Middleware (ClubPro WMS) Webhook right after order creation
         try {
           const orderProducts = await tx.product.findMany({
             where: { id: { in: items.map((i) => i.id) } },
@@ -186,7 +189,7 @@ exports.stripeWebhook = async (req, res) => {
             }),
           });
         } catch (clubProErr) {
-          console.error("ClubPro webhook failed:", clubProErr);
+          console.error("ClubPro middleware webhook failed:", clubProErr);
         }
 
         // 3. Decrease stock in Prisma
@@ -204,15 +207,15 @@ exports.stripeWebhook = async (req, res) => {
           });
         }
 
-        // 3. Fishbowl Sync - Start
-        // A. Sync Customer if not already in Fishbowl
+        /*
+        // ─── Fishbowl Sync commented out per request ───
         let fbCustomerNum = customer.fishbowlCustomerNumber;
         if (!fbCustomerNum) {
           try {
             const custCSV = `CustomerName,BillingAddress,BillingCity,BillingState,BillingZip,BillingCountry,Email\n"${customer.fullName}","${customer.billingStreet || customer.commercialStreet}","${customer.billingCity || customer.commercialCity}","${customer.billingState || customer.commercialState}","${customer.billingZip || customer.commercialZip}","${customer.billingCountry || customer.commercialCountry}","${customer.email}"`;
 
             await fishbowl.importCustomer(custCSV);
-            fbCustomerNum = customer.email; // Using email as unique identifier (change if needed)
+            fbCustomerNum = customer.email;
 
             await tx.customers.update({
               where: { id: customer.id },
@@ -220,9 +223,9 @@ exports.stripeWebhook = async (req, res) => {
             });
           } catch (fbErr) {
             console.error("Fishbowl customer sync failed:", fbErr);
-            // You can decide to throw or continue
           }
         }
+        */
 
         // B. Create Sales Order in Fishbowl
         try {
@@ -348,7 +351,7 @@ exports.stripeWebhook = async (req, res) => {
 };
 
 // ────────────────────────────────────────────────
-// Stripe Checkout Session (with Fishbowl stock check)
+// Stripe Checkout Session
 // ────────────────────────────────────────────────
 exports.stripeSession = async (req, res) => {
   try {
@@ -363,7 +366,11 @@ exports.stripeSession = async (req, res) => {
       return res.status(400).json({ message: "Missing or invalid items" });
     }
 
-    const { items } = req.body;
+    const { items: rawItems } = req.body;
+    const items = rawItems.map((item) => ({
+      ...item,
+      qty: Math.max(1, Number(item.qty || item.quantity || item.count || 1)),
+    }));
     const customerId = req.user.id;
 
     const customer = await prisma.customers.findUnique({
@@ -386,24 +393,12 @@ exports.stripeSession = async (req, res) => {
       return res.status(400).json({ message: "One or more products not found" });
     }
 
-    // ─── Stock Check (Fishbowl if synced, DB fallback otherwise) ───
+    // ─── Stock Check (DB stock) ───
     for (const item of items) {
       const product = products.find((p) => p.id === Number(item.id));
-
-      if (!product.fishbowlPartNumber) {
-        // Not synced to Fishbowl yet — use DB stock
-        if (product.stock < item.qty) {
-          return res.status(400).json({
-            message: `Insufficient stock for "${product.name}"`,
-          });
-        }
-        continue;
-      }
-
-      const fbStock = await fishbowl.getPartInventory(product.fishbowlPartNumber);
-      if (fbStock < item.qty) {
+      if (product.stock < item.qty) {
         return res.status(400).json({
-          message: `Insufficient stock for "${product.name}" (available: ${fbStock}, requested: ${item.qty})`,
+          message: `Insufficient stock for "${product.name}"`,
         });
       }
     }
@@ -416,10 +411,10 @@ exports.stripeSession = async (req, res) => {
 
     for (const item of items) {
       const product = products.find((p) => p.id === Number(item.id));
-      totalWeightLb += Number(product.weightLb) * item.qty;
-      maxLengthIn = Math.max(maxLengthIn, Number(product.lengthIn));
-      maxWidthIn = Math.max(maxWidthIn, Number(product.widthIn));
-      totalHeightIn += Number(product.heightIn) * item.qty;
+      totalWeightLb += Number(product.weightLb || 1) * item.qty;
+      maxLengthIn = Math.max(maxLengthIn, Number(product.lengthIn || 5));
+      maxWidthIn = Math.max(maxWidthIn, Number(product.widthIn || 5));
+      totalHeightIn += Number(product.heightIn || 5) * item.qty;
     }
 
     totalWeightLb = Math.max(0.5, totalWeightLb);
@@ -452,11 +447,11 @@ exports.stripeSession = async (req, res) => {
 
     const addressTo = {
       name: customer.fullName || "Customer",
-      street1: customer.commercialStreet || customer.billingStreet,
+      street1: customer.commercialStreet || customer.billingStreet || "123 Main St",
       street2: "",
-      city: customer.commercialCity || customer.billingCity,
-      state: customer.commercialState || customer.billingState,
-      zip: customer.commercialZip || customer.billingZip,
+      city: customer.commercialCity || customer.billingCity || "City",
+      state: customer.commercialState || customer.billingState || "CA",
+      zip: customer.commercialZip || customer.billingZip || "90001",
       country: customer.commercialCountry || customer.billingCountry || "US",
       phone: "",
       email: customer.email,
@@ -490,37 +485,39 @@ exports.stripeSession = async (req, res) => {
       price_data: {
         currency: "usd",
         product_data: { name: item.name },
-        unit_amount: Math.round(item.price * 100),
+        unit_amount: Math.round(Number(item.price) * 100),
       },
       quantity: item.qty,
     }));
 
-    line_items.push({
-      price_data: {
-        currency: "usd",
-        product_data: { name: selectedRate ? `Shipping (${selectedRate.servicelevel.name})` : "Shipping" },
-        unit_amount: Math.round(shippingCost * 100),
-      },
-      quantity: 1,
-    });
+    if (shippingCost > 0 || selectedRate) {
+      line_items.push({
+        price_data: {
+          currency: "usd",
+          product_data: { name: selectedRate ? `Shipping (${selectedRate.servicelevel?.name || 'Flat Rate'})` : "Shipping" },
+          unit_amount: Math.round(shippingCost * 100),
+        },
+        quantity: 1,
+      });
+    }
 
     const stripeCustomer = await stripe.customers.create({
       email: customer.email,
       name: customer.fullName,
       address: {
-        line1: customer.billingStreet,
-        city: customer.billingCity,
-        state: customer.billingState,
-        postal_code: customer.billingZip,
+        line1: customer.billingStreet || "123 Main St",
+        city: customer.billingCity || "City",
+        state: customer.billingState || "CA",
+        postal_code: customer.billingZip || "90001",
         country: customer.billingCountry || "US",
       },
       shipping: {
         name: customer.fullName,
         address: {
-          line1: customer.commercialStreet || customer.billingStreet,
-          city: customer.commercialCity || customer.billingCity,
-          state: customer.commercialState || customer.billingState,
-          postal_code: customer.commercialZip || customer.billingZip,
+          line1: customer.commercialStreet || customer.billingStreet || "123 Main St",
+          city: customer.commercialCity || customer.billingCity || "City",
+          state: customer.commercialState || customer.billingState || "CA",
+          postal_code: customer.commercialZip || customer.billingZip || "90001",
           country: customer.commercialCountry || customer.billingCountry || "US",
         },
       },
@@ -555,7 +552,7 @@ exports.stripeSession = async (req, res) => {
     res.json({ url: session.url });
   } catch (err) {
     console.error("Stripe session creation failed:", err);
-    res.status(500).json({ message: "Failed to create Stripe checkout session" });
+    res.status(500).json({ message: "Failed to create Stripe checkout session", error: err.message });
   }
 };
 

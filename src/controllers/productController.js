@@ -3,7 +3,7 @@ const { put, del } = require("@vercel/blob");
 const prisma = new PrismaClient();
 const path = require("path");
 const fs = require("fs");
-const fishbowl = require('../services/fishbowlService');
+// const fishbowl = require('../services/fishbowlService');
 // ==================== CREATE PRODUCT ====================
 const createProduct = async (req, res) => {
   try {
@@ -88,69 +88,7 @@ const createProduct = async (req, res) => {
       include: { brand: { select: { name: true } }, model: { select: { name: true } }, productType: { select: { name: true } } },
     });
 
-    // Return response immediately so UI doesn't hang on Fishbowl API call
     res.status(201).json({ message: "Product created", product });
-
-    // ─────────────────────────────────────────────
-    // Fishbowl Sync - Background Execution (Non-Blocking)
-    (async () => {
-      let csvData = '';
-      try {
-        const partNumber = `PROD-${product.id}`;
-
-        // Description safe format
-        let descriptionValue = product.description?.trim();
-        if (!descriptionValue || descriptionValue.length < 1) {
-          descriptionValue = `Product: ${product.name.trim()} - Imported from e-commerce`;
-        }
-
-        // Clean special characters
-        descriptionValue = descriptionValue
-          .replace(/"/g, '""')           // escape double quotes
-          .replace(/\r?\n|\r/g, ' ')     // line breaks to space
-          .replace(/,/g, ' ')            // comma to space
-          .trim();
-
-        const csvHeader = "PartNumber,PartDescription,PartType,UOM,Price,Weight,Active,ManagePart,POItemType";
-
-        const rowValues = [
-          partNumber,
-          descriptionValue,
-          "Inventory",
-          "ea",
-          Number(product.salePrice || product.regularPrice || 0).toFixed(2),
-          Number(product.weightLb || 1).toFixed(2),
-          "Y",
-          "Y",
-          "Purchase"
-        ];
-
-        const csvRow = rowValues.map(value => {
-          const str = String(value);
-          return `"${str.replace(/"/g, '""')}"`;
-        }).join(',');
-
-        csvData = csvHeader + "\r\n" + csvRow;
-
-        const fbResponse = await fishbowl.importPart(csvData);
-        console.log('[Background] Fishbowl import response:', JSON.stringify(fbResponse, null, 2));
-
-        // Save to Prisma
-        await prisma.product.update({
-          where: { id: product.id },
-          data: { fishbowlPartNumber: partNumber },
-        });
-
-        console.log(`[Background] Fishbowl Part synced successfully: ${partNumber}`);
-      } catch (fbErr) {
-        console.error('[Background] Fishbowl product sync failed details:', {
-          message: fbErr.message,
-          status: fbErr.response?.status,
-          fullError: fbErr.response?.data,
-          csvSent: csvData || 'CSV not defined'
-        });
-      }
-    })();
   } catch (error) {
     console.error("Create product error:", error);
     res.status(500).json({ message: "Failed to create product", error: error.message });
@@ -230,24 +168,7 @@ const updateProduct = async (req, res) => {
       include: { brand: { select: { name: true } }, model: { select: { name: true } }, productType: { select: { name: true } } },
     });
 
-    // Return response immediately
     res.status(200).json({ message: "Product updated", product: updatedProduct });
-
-    // ─── Fishbowl Sync on Update (Background Execution) ───
-    if (updatedProduct.fishbowlPartNumber) {
-      (async () => {
-        try {
-          const csvHeader = "PartNumber,Description,UOM,Price,WeightLb,Type,Active,ManagePart";
-          const csvRow = `"${updatedProduct.fishbowlPartNumber}","${updatedProduct.name} - ${updatedProduct.description || ''}","Each",${updatedProduct.salePrice || updatedProduct.regularPrice},${updatedProduct.weightLb || 1},"Inventory","Y","Y"`;
-          const csvData = `${csvHeader}\n${csvRow}`;
-
-          await fishbowl.importPart(csvData);
-          console.log(`[Background] Fishbowl Part updated: ${updatedProduct.fishbowlPartNumber}`);
-        } catch (fbErr) {
-          console.error('[Background] Fishbowl update sync failed:', fbErr.message || fbErr);
-        }
-      })();
-    }
   } catch (error) {
     console.error("Update product error:", error);
     if (error.code === 'P2002' && (error.meta?.target?.includes('sku') || String(error.message).includes('sku'))) {
