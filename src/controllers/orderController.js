@@ -83,6 +83,11 @@ exports.stripeWebhook = async (req, res) => {
     const shipAddr = shipSource.address || {};
     const { firstName: shipFirstName, lastName: shipLastName } = splitName(shipSource.name);
 
+    // customer_details is what Stripe collected via billing_address_collection: "required"
+    const billSource = session.customer_details || {};
+    const billAddr = billSource.address || {};
+    const { firstName: billFirstName, lastName: billLastName } = splitName(billSource.name);
+
     try {
       await prisma.$transaction(async (tx) => {
         const customer = await tx.customers.findUnique({
@@ -131,14 +136,26 @@ exports.stripeWebhook = async (req, res) => {
             where: { id: { in: items.map((i) => i.id) } },
           });
 
+          const subtotal = items.reduce(
+            (acc, item) => acc + Number(item.price) * item.qty,
+            0
+          );
+          const totalTax = (session.total_details?.amount_tax || 0) / 100;
+
           await sendClubProOrderWebhook({
             order: {
               order_number: String(order.id),
               order_date: order.createdAt.toISOString(),
+              currency: (session.currency || "usd").toUpperCase(),
+              subtotal: subtotal.toFixed(2),
+              total_tax: totalTax.toFixed(2),
+              total_shipping: shippingCost.toFixed(2),
+              total_price: (session.amount_total / 100).toFixed(2),
             },
-            customer: {
+            shipping_address: {
               first_name: shipFirstName || null,
               last_name: shipLastName || null,
+              company: null,
               address1: shipAddr.line1 || null,
               address2: shipAddr.line2 || null,
               city: shipAddr.city || null,
@@ -147,6 +164,17 @@ exports.stripeWebhook = async (req, res) => {
               country: shipAddr.country || null,
               email: session.customer_details?.email || null,
               phone: session.customer_details?.phone || null,
+            },
+            billing_address: {
+              first_name: billFirstName || null,
+              last_name: billLastName || null,
+              company: null,
+              address1: billAddr.line1 || null,
+              address2: billAddr.line2 || null,
+              city: billAddr.city || null,
+              state: billAddr.state || null,
+              zip: billAddr.postal_code || null,
+              country: billAddr.country || null,
             },
             line_items: items.map((item) => {
               const product = orderProducts.find((p) => p.id === item.id);

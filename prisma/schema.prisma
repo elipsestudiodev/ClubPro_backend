@@ -84,7 +84,7 @@ model Product {
   name         String
   sku          String?     @unique @db.VarChar(100)
   stock        Int         @default(0)
-  salePrice    Decimal     @db.Decimal(10, 2)
+  salePrice    Decimal?    @db.Decimal(10, 2)
   regularPrice Decimal     @db.Decimal(10, 2)
   color        String? // Only used for Enclosure products
   imageOne     String?
@@ -102,11 +102,11 @@ model Product {
   brand        Brand       @relation(fields: [brandId], references: [id])
   model        Model       @relation(fields: [modelId], references: [id])
   productType  ProductType @relation(fields: [typeId], references: [id])
-  weightLb     Decimal     @db.Decimal(8, 2) // e.g. 2.50
+  weightLb     Decimal?    @db.Decimal(8, 2) // e.g. 2.50
 
-  lengthIn       Decimal  @db.Decimal(8, 2)
-  widthIn        Decimal  @db.Decimal(8, 2)
-  heightIn       Decimal  @db.Decimal(8, 2)
+  lengthIn       Decimal? @db.Decimal(8, 2)
+  widthIn        Decimal? @db.Decimal(8, 2)
+  heightIn       Decimal? @db.Decimal(8, 2)
   description    String
   seoTitle       String?  @db.VarChar(255)
   seoDescription String?  @db.Text
