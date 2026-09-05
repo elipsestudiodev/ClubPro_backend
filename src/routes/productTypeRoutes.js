@@ -5,6 +5,7 @@ const {
   createProductType,
   updateProductType,
   deleteProductType,
+  bulkDeleteProductTypes,
   allProductType
 } = require('../controllers/productTypeController');
 
@@ -17,5 +18,6 @@ router.get('/product-types/:id', getProductType);
 router.post('/product-types', createProductType);
 router.put('/product-types/:id', updateProductType);
 router.delete('/product-types/:id', deleteProductType);
+router.post('/bulk-delete-product-types', bulkDeleteProductTypes);
 
 module.exports = router;

@@ -17,7 +17,7 @@ const getProductTypes = async (req, res) => {
 
   try {
     const types = await prisma.productType.findMany({
-      include: { products: true },
+      include: { _count: { select: { products: true } } },
       orderBy: {
         name: "asc",
       },
@@ -117,6 +117,25 @@ const deleteProductType = async (req, res) => {
   }
 };
 
+// Bulk delete product types
+const bulkDeleteProductTypes = async (req, res) => {
+  const { ids } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: "Please provide an array of IDs" });
+  }
+
+  try {
+    const deleted = await prisma.productType.deleteMany({
+      where: { id: { in: ids.map((id) => parseInt(id)) } },
+    });
+    res.json({ message: `${deleted.count} product type(s) deleted successfully` });
+  } catch (error) {
+    console.error("Error bulk deleting product types:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getProductTypes,
   getProductType,
@@ -124,4 +143,5 @@ module.exports = {
   createProductType,
   updateProductType,
   deleteProductType,
+  bulkDeleteProductTypes,
 };

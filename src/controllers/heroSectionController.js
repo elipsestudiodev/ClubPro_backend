@@ -4,9 +4,11 @@ const path = require('path');
 const fs = require('fs');
 
 const getHeroSections = async (req, res) => {
-    const { page = 1, limit = 10, search = '' } = req.query;
+    const { page = 1, limit = 10, search = '', sort = 'createdAt', order = 'asc' } = req.query;
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 10;
 
-    const skip = (page - 1) * limit;
+    const skip = (pageNum - 1) * limitNum;
     try {
         const where = search
             ? {
@@ -19,9 +21,9 @@ const getHeroSections = async (req, res) => {
         const [heroSections, total] = await prisma.$transaction([
             prisma.heroSection.findMany({
                 where,
-                orderBy: { createdAt: 'asc' },
+                orderBy: { [sort]: order === 'desc' ? 'desc' : 'asc' },
                 skip,
-                take: parseInt(limit),
+                take: limitNum,
             }),
             prisma.heroSection.count({ where }),
         ]);
@@ -29,9 +31,9 @@ const getHeroSections = async (req, res) => {
             data: heroSections,
             pagination: {
                 total,
-                page,
-                limit,
-                totalPages: Math.ceil(total / limit),
+                page: pageNum,
+                limit: limitNum,
+                totalPages: Math.max(1, Math.ceil(total / limitNum)),
             },
         });
     } catch (error) {

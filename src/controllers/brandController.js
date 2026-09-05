@@ -21,8 +21,7 @@ const getBrands = async (req, res) => {
   try {
     const brands = await prisma.brand.findMany({
       include: {
-        models: true,
-        products: true,
+        _count: { select: { models: true, products: true } },
       },
       orderBy: {
         [sort]: order,
@@ -56,9 +55,6 @@ const getBrand = async (req, res) => {
       where: { id: parseInt(id) },
       include: {
         models: true,
-        products: {
-          include: { productType: true },
-        },
       },
     });
 
@@ -72,9 +68,7 @@ const getBrand = async (req, res) => {
 
 const allBrand = async (req, res) => {
   try {
-    const brands = await prisma.brand.findMany({
-      include: { models: true },
-    });
+    const brands = await prisma.brand.findMany();
     res.json(brands);
   } catch (error) {
     res.status(500).json({ error: error.message });

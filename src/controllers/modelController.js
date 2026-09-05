@@ -17,7 +17,7 @@ const getModels = async (req, res) => {
 
   try {
     const models = await prisma.model.findMany({
-      include: { brand: true, products: true },
+      include: { brand: true, _count: { select: { products: true } } },
       orderBy: {
         id: order,
       },

@@ -5,9 +5,11 @@ const fs = require('fs');
 const prisma = new PrismaClient();
 
 const getStatsCards = async (req, res) => {
-    const { page = 1, limit = 10, search = '' } = req.query;
+    const { page = 1, limit = 10, search = '', sort = 'createdAt', order = 'asc' } = req.query;
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 10;
 
-    const skip = (page - 1) * limit;
+    const skip = (pageNum - 1) * limitNum;
     try {
         const where = search
             ? {
@@ -20,9 +22,9 @@ const getStatsCards = async (req, res) => {
         const [statsCards, total] = await prisma.$transaction([
             prisma.statsCards.findMany({
                 where,
-                orderBy: { createdAt: 'asc' },
+                orderBy: { [sort]: order === 'desc' ? 'desc' : 'asc' },
                 skip,
-                take: parseInt(limit),
+                take: limitNum,
             }),
             prisma.statsCards.count({ where }),
         ]);
@@ -30,9 +32,9 @@ const getStatsCards = async (req, res) => {
             data: statsCards,
             pagination: {
                 total,
-                page,
-                limit,
-                totalPages: Math.ceil(total / limit),
+                page: pageNum,
+                limit: limitNum,
+                totalPages: Math.max(1, Math.ceil(total / limitNum)),
             },
         });
     } catch (error) {
