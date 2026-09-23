@@ -81,7 +81,7 @@ const corsOptions = {
 };
 
 app.use(cors()); // This enables CORS with default settings (allows all origins)app.use(express.json());
-app.use(express.json());
+app.use(express.json({ limit: "20mb" }));
 app.get("/", (req, res) => {
   res.status(200).json({ status: "success", message: "Server is running!!" });
 });

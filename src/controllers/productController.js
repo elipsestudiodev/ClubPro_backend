@@ -377,6 +377,29 @@ const toggleProductStock = async (req, res) => {
   }
 };
 
+// ==================== CSV IMPORT ====================
+// Accepts rows in the same format as "Export All Products" (the master sheet).
+// Matches existing products by ID -> SKU -> (name, brand, model, type, color)
+// and updates them; otherwise creates a new product. Only columns present in
+// the CSV are written on update, so partial sheets don't wipe other fields.
+const looseKey = (v) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+const csvStr = (v) => {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  const s = String(v).trim();
+  return s === "" ? null : s;
+};
+
+const csvNum = (v, field, isInt = false) => {
+  if (v === undefined) return undefined;
+  const s = String(v ?? "").replace(/[$,\s]/g, "");
+  if (s === "") return null;
+  const n = Number(s);
+  if (!Number.isFinite(n)) throw new Error(`Invalid number in "${field}": ${v}`);
+  return isInt ? Math.trunc(n) : n;
+};
+
 const importProductsFromCSV = async (req, res) => {
   const { products } = req.body;
 
@@ -385,167 +408,133 @@ const importProductsFromCSV = async (req, res) => {
   }
 
   try {
-    const brandCache = {};
-    const modelCache = {};
-    const typeCache = {};
+    const [brands, types, models] = await Promise.all([
+      prisma.brand.findMany({ select: { id: true, name: true } }),
+      prisma.productType.findMany({ select: { id: true, name: true } }),
+      prisma.model.findMany({ select: { id: true, name: true, brandId: true } }),
+    ]);
+
+    // Exact (case-insensitive) match first, then loose match ignoring spaces/punctuation
+    // so "Ez-Go" matches "E-Z-GO" and "Club Car" matches "ClubCar".
+    const findByName = (list, name) => {
+      const lower = String(name).trim().toLowerCase();
+      return (
+        list.find((x) => x.name.trim().toLowerCase() === lower) ||
+        list.find((x) => looseKey(x.name) === looseKey(name))
+      );
+    };
 
     let created = 0;
     let updated = 0;
     let skipped = 0;
+    const errors = [];
 
-    for (const row of products) {
-      const {
-        name,
-        sku,
-        brand,
-        model,
-        type,
-        color,
-        stock,
-        salePrice,
-        regularPrice,
-        ImageOne,
-        ImageTwo,
-        ImageThree,
-        ImageFour,
-        imageOne,
-        imageTwo,
-        imageThree,
-        imageFour,
-        description,
-        weightLb,
-        lengthIn,
-        widthIn,
-        heightIn,
-        seoTitle,
-        seoDescription,
-        seoKeywords,
-        slug,
-      } = row;
+    for (let i = 0; i < products.length; i++) {
+      const row = products[i];
+      const rowNo = row._row ?? i + 1;
+      const name = csvStr(row.name);
 
-      if (!name || !brand || !model || !type) {
-        skipped++;
-        continue;
-      }
+      try {
+        const brandName = csvStr(row.brand);
+        const modelName = csvStr(row.model);
+        const typeName = csvStr(row.type);
 
-      // ---------- BRAND (must exist) ----------
-      if (!brandCache[brand]) {
-        const dbBrand = await prisma.brand.findUnique({
-          where: { name: brand.trim() },
-        });
-        if (!dbBrand) {
-          skipped++;
-          continue;
+        if (!name || !brandName || !modelName || !typeName) {
+          throw new Error("Name, Brand, Model and Type are required");
         }
-        brandCache[brand] = dbBrand.id;
-      }
 
-      // ---------- TYPE (must exist) ----------
-      if (!typeCache[type]) {
-        const dbType = await prisma.productType.findUnique({
-          where: { name: type.trim() },
-        });
-        if (!dbType) {
-          skipped++;
-          continue;
-        }
-        typeCache[type] = dbType.id;
-      }
+        const brand = findByName(brands, brandName);
+        if (!brand) throw new Error(`Brand "${brandName}" not found`);
 
-      // ---------- MODEL (must exist) ----------
-      const modelKey = `${model}_${brandCache[brand]}`;
-      if (!modelCache[modelKey]) {
-        const dbModel = await prisma.model.findUnique({
-          where: {
-            name_brandId: {
-              name: model.trim(),
-              brandId: brandCache[brand],
+        const type = findByName(types, typeName);
+        if (!type) throw new Error(`Product Type "${typeName}" not found`);
+
+        const model = findByName(
+          models.filter((m) => m.brandId === brand.id),
+          modelName
+        );
+        if (!model) throw new Error(`Model "${modelName}" not found for brand "${brand.name}"`);
+
+        const sku = csvStr(row.sku);
+        const color = csvStr(row.color);
+
+        const data = {
+          name,
+          brandId: brand.id,
+          modelId: model.id,
+          typeId: type.id,
+          sku,
+          color,
+          stock: csvNum(row.stock, "Stock", true),
+          regularPrice: csvNum(row.regularPrice, "Regular Price"),
+          salePrice: csvNum(row.salePrice, "Sale Price"),
+          weightLb: csvNum(row.weightLb, "Weight (lb)"),
+          lengthIn: csvNum(row.lengthIn, "Length (in)"),
+          widthIn: csvNum(row.widthIn, "Width (in)"),
+          heightIn: csvNum(row.heightIn, "Height (in)"),
+          description: csvStr(row.description),
+          seoTitle: csvStr(row.seoTitle),
+          seoDescription: csvStr(row.seoDescription),
+          seoKeywords: csvStr(row.seoKeywords),
+          slug: csvStr(row.slug),
+          imageOne: csvStr(row.imageOne),
+          imgAltOne: csvStr(row.imgAltOne),
+          imageTwo: csvStr(row.imageTwo),
+          imgAltTwo: csvStr(row.imgAltTwo),
+          imageThree: csvStr(row.imageThree),
+          imgAltThree: csvStr(row.imgAltThree),
+          imageFour: csvStr(row.imageFour),
+          imgAltFour: csvStr(row.imgAltFour),
+          fishbowlPartNumber: csvStr(row.fishbowlPartNumber),
+        };
+
+        // Drop columns that weren't in the CSV so updates don't touch them
+        Object.keys(data).forEach((k) => data[k] === undefined && delete data[k]);
+
+        // ---------- Find existing: ID -> SKU -> composite ----------
+        let existing = null;
+        const id = csvNum(row.id, "ID", true);
+        if (id) existing = await prisma.product.findUnique({ where: { id } });
+        if (!existing && sku) existing = await prisma.product.findUnique({ where: { sku } });
+        if (!existing) {
+          existing = await prisma.product.findFirst({
+            where: {
+              name,
+              brandId: brand.id,
+              modelId: model.id,
+              typeId: type.id,
+              color: color ?? null,
             },
-          },
-        });
-        if (!dbModel) {
-          skipped++;
-          continue;
+          });
         }
-        modelCache[modelKey] = dbModel.id;
-      }
 
-      // ---------- IMAGES ----------
-      const img1 = ImageOne || imageOne || null;
-      const img2 = ImageTwo || imageTwo || null;
-      const img3 = ImageThree || imageThree || null;
-      const img4 = ImageFour || imageFour || null;
-
-      const productColor =
-        type.trim() === "Enclosure" ? color?.trim() || null : null;
-
-      // 1️⃣ Try to find existing product
-      const existingProduct = await prisma.product.findFirst({
-        where: {
-          name: name.trim(),
-          brandId: brandCache[brand],
-          modelId: modelCache[modelKey],
-          typeId: typeCache[type],
-          color: productColor,
-        },
-      });
-
-      // 2️⃣ Update OR Create
-      if (existingProduct) {
-        await prisma.product.update({
-          where: { id: existingProduct.id },
-          data: {
-            sku: sku?.trim() || existingProduct.sku,
-            stock: parseInt(stock || 0, 10),
-            salePrice: salePrice ? parseFloat(salePrice) : 0,
-            regularPrice: regularPrice ? parseFloat(regularPrice) : 0,
-            color: productColor,
-            description: description?.trim() || null,
-            weightLb: parseFloat(weightLb),
-            lengthIn: parseFloat(lengthIn),
-            widthIn: parseFloat(widthIn),
-            heightIn: parseFloat(heightIn),
-            seoTitle: seoTitle?.trim() || null,
-            seoDescription: seoDescription?.trim() || null,
-            seoKeywords: seoKeywords?.trim() || null,
-            slug: slug?.trim() || null,
-            imageOne: img1?.trim() || null,
-            imageTwo: img2?.trim() || null,
-            imageThree: img3?.trim() || null,
-            imageFour: img4?.trim() || null,
-          },
-        });
-
-        updated++;
-      } else {
-        await prisma.product.create({
-          data: {
-            name: name.trim(),
-            sku: sku?.trim() || null,
-            stock: parseInt(stock || 0, 10),
-            salePrice: salePrice ? parseFloat(salePrice) : 0,
-            regularPrice: regularPrice ? parseFloat(regularPrice) : 0,
-            color: productColor,
-            description: description?.trim() || null,
-            weightLb: parseFloat(weightLb),
-            lengthIn: parseFloat(lengthIn),
-            widthIn: parseFloat(widthIn),
-            heightIn: parseFloat(heightIn),
-            seoTitle: seoTitle?.trim() || null,
-            seoDescription: seoDescription?.trim() || null,
-            seoKeywords: seoKeywords?.trim() || null,
-            slug: slug?.trim() || null,
-            imageOne: img1?.trim() || null,
-            imageTwo: img2?.trim() || null,
-            imageThree: img3?.trim() || null,
-            imageFour: img4?.trim() || null,
-            brandId: brandCache[brand],
-            modelId: modelCache[modelKey],
-            typeId: typeCache[type],
-          },
-        });
-
-        created++;
+        if (existing) {
+          if (data.regularPrice === null) delete data.regularPrice;
+          if (data.stock === null) data.stock = 0;
+          if (data.description === null) data.description = "";
+          await prisma.product.update({ where: { id: existing.id }, data });
+          updated++;
+        } else {
+          await prisma.product.create({
+            data: {
+              ...data,
+              stock: data.stock ?? 0,
+              regularPrice: data.regularPrice ?? 0,
+              description: data.description ?? "",
+            },
+          });
+          created++;
+        }
+      } catch (err) {
+        skipped++;
+        let message = err.message;
+        if (err.code === "P2002") {
+          const target = String(err.meta?.target ?? "");
+          message = `Duplicate value for unique field (${target || "sku/slug/fishbowl part"}) — already used by another product`;
+        } else if (err.code) {
+          message = message.split("\n").filter(Boolean).pop();
+        }
+        errors.push({ row: rowNo, name: name || "", message });
       }
     }
 
@@ -554,6 +543,7 @@ const importProductsFromCSV = async (req, res) => {
       created,
       updated,
       skipped,
+      errors,
       totalProcessed: products.length,
     });
   } catch (error) {
