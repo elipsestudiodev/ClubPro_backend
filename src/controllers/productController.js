@@ -401,7 +401,7 @@ const csvNum = (v, field, isInt = false) => {
 };
 
 const importProductsFromCSV = async (req, res) => {
-  const { products } = req.body;
+  const { products, autoCreate = false } = req.body;
 
   if (!Array.isArray(products) || products.length === 0) {
     return res.status(400).json({ message: "No products provided" });
@@ -443,17 +443,32 @@ const importProductsFromCSV = async (req, res) => {
           throw new Error("Name, Brand, Model and Type are required");
         }
 
-        const brand = findByName(brands, brandName);
-        if (!brand) throw new Error(`Brand "${brandName}" not found`);
+        let brand = findByName(brands, brandName);
+        if (!brand) {
+          if (!autoCreate) throw new Error(`Brand "${brandName}" not found`);
+          brand = await prisma.brand.create({ data: { name: brandName }, select: { id: true, name: true } });
+          brands.push(brand);
+        }
 
-        const type = findByName(types, typeName);
-        if (!type) throw new Error(`Product Type "${typeName}" not found`);
+        let type = findByName(types, typeName);
+        if (!type) {
+          if (!autoCreate) throw new Error(`Product Type "${typeName}" not found`);
+          type = await prisma.productType.create({ data: { name: typeName }, select: { id: true, name: true } });
+          types.push(type);
+        }
 
-        const model = findByName(
+        let model = findByName(
           models.filter((m) => m.brandId === brand.id),
           modelName
         );
-        if (!model) throw new Error(`Model "${modelName}" not found for brand "${brand.name}"`);
+        if (!model) {
+          if (!autoCreate) throw new Error(`Model "${modelName}" not found for brand "${brand.name}"`);
+          model = await prisma.model.create({
+            data: { name: modelName, brandId: brand.id },
+            select: { id: true, name: true, brandId: true },
+          });
+          models.push(model);
+        }
 
         const sku = csvStr(row.sku);
         const color = csvStr(row.color);
